@@ -16,13 +16,20 @@ export function createPedestrian(random, x, y) {
 }
 export function spawnPedestrians(random, count) {
   const peds = [];
-  for (let i = 0; i < count; i += 1) {
+  while (peds.length < count) {
     if (random() < 0.18) { peds.push(createPedestrian(random, BEACH_X + 40 + random() * 200, 100 + random() * 2400)); continue; }
     const vertical = random() < 0.5;
     const road = pickFrom(random, vertical ? AVENUES : STREETS);
     const off = (random() < 0.5 ? -1 : 1) * (64 + random() * 14);
     const along = 100 + random() * 2400;
-    peds.push(createPedestrian(random, vertical ? road + off : along, vertical ? along : road + off));
+    const x = vertical ? road + off : along; const y = vertical ? along : road + off;
+    peds.push(createPedestrian(random, x, y));
+    // Many strollers walk in pairs: a companion a few steps off, same pavement.
+    if (peds.length < count && random() < 0.45) {
+      const mate = createPedestrian(random, x + rangeIn(random, -20, 20), y + rangeIn(random, -20, 20));
+      mate.wait = rangeIn(random, 0, 2);
+      peds.push(mate);
+    }
   }
   return peds;
 }

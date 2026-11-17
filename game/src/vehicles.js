@@ -2,7 +2,7 @@
 // serves the player, traffic and police — throttle, brake/reverse, steering
 // that bites harder at low speed, drag, and body damage from impacts.
 import { CAR_MODELS, POLICE_MODEL } from './config.js';
-import { AVENUES, STREETS, collideCircle, nearestCrossing } from './city.js';
+import { AVENUES, STREETS, collideCircle } from './city.js';
 import { angleLerp, clamp, pickFrom } from './random.js';
 
 let nextId = 1;
@@ -20,8 +20,9 @@ export function spawnParkedCars(city, random, count) {
     const avenue = pickFrom(random, AVENUES);
     const y = 120 + random() * 2360;
     if (STREETS.some((s) => Math.abs(y - s) < 80)) continue;
-    const side = random() < 0.5 ? -34 : 34;
-    cars.push(createCar(random, avenue + side, y, side < 0 ? Math.PI : 0, 'parked'));
+    const side = random() < 0.5 ? -40 : 40;
+    // Parallel to the avenue, hugging the kerb — not across the driving lanes.
+    cars.push(createCar(random, avenue + side, y, side < 0 ? Math.PI / 2 : -Math.PI / 2, 'parked'));
   }
   return cars;
 }
@@ -56,26 +57,44 @@ export function driveCar(car, dt, throttle, steer) {
   car.y += Math.sin(car.angle) * car.speed * dt;
   return Math.abs(car.speed);
 }
-/** Traffic brain: cruise the current road, slow for the car ahead, turn at crossings. */
+/** Next traffic waypoint: the lane point at the next crossing along the
+ * car's current road — or, sometimes, the lane point one crossing down the
+ * crossing road. Every leg between two waypoints stays inside the union of
+ * the two road strips, so traffic never cuts across a block corner. */
+function nextTrafficTarget(car, random) {
+  const vertical = Math.abs(Math.sin(car.angle)) >= Math.abs(Math.cos(car.angle));
+  const roads = vertical ? AVENUES : STREETS;
+  const cross = vertical ? STREETS : AVENUES;
+  const pos = vertical ? car.y : car.x;
+  const dir = vertical ? (Math.sin(car.angle) >= 0 ? 1 : -1) : (Math.cos(car.angle) >= 0 ? 1 : -1);
+  const road = roads.reduce((b, r) => (Math.abs(r - (vertical ? car.x : car.y)) < Math.abs(b - (vertical ? car.x : car.y)) ? r : b), roads[0]);
+  const ahead = cross.filter((c) => (c - pos) * dir > 30).sort((p, q) => (p - pos) * dir - (q - pos) * dir)[0];
+  if (ahead !== undefined && random() < 0.38) { // turn onto the crossing road
+    let dir2 = random() < 0.5 ? 1 : -1;
+    let next = roads.filter((r) => (r - (vertical ? car.x : car.y)) * dir2 > 30).sort((p, q) => (p - (vertical ? car.x : car.y)) * dir2 - (q - (vertical ? car.x : car.y)) * dir2)[0];
+    if (next === undefined) { dir2 = -dir2; next = roads.filter((r) => (r - (vertical ? car.x : car.y)) * dir2 > 30).sort((p, q) => (p - (vertical ? car.x : car.y)) * dir2 - (q - (vertical ? car.x : car.y)) * dir2)[0]; }
+    if (next !== undefined) return vertical ? { x: next, y: ahead + 26 * dir2 } : { x: ahead + 26 * dir2, y: next };
+  }
+  if (ahead !== undefined) return vertical ? { x: road + 26 * dir, y: ahead } : { x: ahead, y: road + 26 * dir };
+  // The road runs out: U-turn at the last crossing behind, on the far lane.
+  const behind = cross.filter((c) => (c - pos) * dir < -30).sort((p, q) => (q - pos) * dir - (p - pos) * dir)[0];
+  if (behind !== undefined) return vertical ? { x: road - 26 * dir, y: behind } : { x: behind, y: road - 26 * dir };
+  return vertical ? { x: road + 26 * dir, y: pos + 260 * dir } : { x: pos + 260 * dir, y: road + 26 * dir };
+}
+/** Traffic brain: follow the road grid waypoint to waypoint, holding the
+ * lane line, easing into turns, and slowing for the car ahead. */
 export function trafficThink(car, dt, cars, random) {
   let throttle = 0.72; let steer = 0;
-  // Hold the lane line: aim at a point ahead on the same road.
-  if (!car.target || Math.hypot(car.target.x - car.x, car.target.y - car.y) < 90) {
-    const cross = nearestCrossing(car.x + Math.cos(car.angle) * 260, car.y + Math.sin(car.angle) * 260);
-    car.target = cross;
-    if (random() < 0.4) { // sometimes turn: aim down the crossing road instead
-      const vertical = AVENUES.includes(cross.x) && Math.abs(Math.cos(car.angle)) < 0.5;
-      car.target = vertical ? { x: cross.x, y: cross.y } : cross;
-    }
+  if (!car.target || Math.hypot(car.target.x - car.x, car.target.y - car.y) < 70) {
+    car.target = nextTrafficTarget(car, random);
   }
   const want = Math.atan2(car.target.y - car.y, car.target.x - car.x);
   let diff = want - car.angle;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  steer = clamp(diff * 2.2, -1, 1);
-  // Keep right-hand lane offset.
-  const laneX = car.target.x - Math.sin(want) * 0 + Math.cos(want + Math.PI / 2) * 0;
-  void laneX;
+  steer = clamp(diff * 2.4, -1, 1);
+  if (Math.abs(diff) > 1.1) throttle = 0.05; // near-stop swing: U-turns stay on the road
+  else if (Math.abs(diff) > 0.55) throttle = 0.35; // ease off while the nose comes round
   for (const other of cars) {
     if (other === car || other.dead) continue;
     const fx = car.x + Math.cos(car.angle) * 62; const fy = car.y + Math.sin(car.angle) * 62;

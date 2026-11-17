@@ -5,6 +5,7 @@
 // where the pilot drives and where the cast waits, never composited.
 import { SCREEN_TITLE, SCREEN_PLAY } from './render.js';
 import { STEP } from './config.js';
+import { nearestCrossing } from './city.js';
 
 const silentAudio = { door() {}, engine() {}, siren() {}, shot() {}, punch() {}, crash() {}, pickup() {}, cash() {}, jingle() {}, music() {} };
 /** A fake held-keys input: drives south in the right lane of avenue x=1440. */
@@ -26,13 +27,30 @@ export function stageShot(name, world) {
     // job 1's marker across town, traffic rolling, people on the sidewalks.
     s.clock = 10 * 60 + 40;
     run(world, 2.0, null);
+    // Frame hygiene: two seconds of ambient chaos can leave a car shoved
+    // against a building inside the shot. Clear any such car back to its
+    // nearest crossing before the cast is placed (staged cars are set
+    // after this, on roads, and are not touched).
+    for (const c of s.cars) {
+      if (c.kind !== 'traffic' || c.dead) continue;
+      if (c.x < 880 || c.x > 2160 || c.y < 300 || c.y > 1020) continue;
+      for (const b of s.city.buildings) {
+        const dx = Math.max(b.x - c.x, 0, c.x - (b.x + b.w));
+        const dy = Math.max(b.y - c.y, 0, c.y - (b.y + b.h));
+        if (Math.hypot(dx, dy) < 12) {
+          const cross = nearestCrossing(c.x, c.y);
+          c.x = cross.x; c.y = cross.y; c.speed = 0; c.target = null;
+          break;
+        }
+      }
+    }
     p.x = 1470; p.y = 700; p.angle = 0.5; p.aimAngle = 0.5; p.car = null;
     const spots = [[1500, 500], [1380, 560], [1500, 1020], [1380, 1080], [1500, 340], [1380, 1240]];
     s.peds.forEach((ped, i) => { if (i < spots.length) { ped.x = spots[i][0]; ped.y = spots[i][1]; ped.panic = 0; ped.target = null; } });
     const traffic = s.cars.filter((c) => c.kind === 'traffic');
     if (traffic[0]) { traffic[0].x = 1466; traffic[0].y = 430; traffic[0].angle = Math.PI / 2; traffic[0].speed = 120; }
     if (traffic[1]) { traffic[1].x = 1150; traffic[1].y = 766; traffic[1].angle = 0; traffic[1].speed = 110; }
-    if (traffic[2]) { traffic[2].x = 1800; traffic[2].y = 714; traffic[2].angle = Math.PI; traffic[2].speed = 100; }
+    if (traffic[2]) { traffic[2].x = 2066; traffic[2].y = 900; traffic[2].angle = -Math.PI / 2; traffic[2].speed = 100; }
     s.camera.x = 1520; s.camera.y = 660;
     world.step(STEP, null, silentAudio);
     s.camera.x = 1520; s.camera.y = 660;
@@ -59,11 +77,11 @@ export function stageShot(name, world) {
     // frame behind the coupe — they are real pursuit cars either way.
     const cops = s.cars.filter((c) => c.kind === 'police' && !c.dead)
       .sort((a, b) => Math.hypot(a.x - car.x, a.y - car.y) - Math.hypot(b.x - car.x, b.y - car.y));
-    const slots = [[-120, -26], [-225, 28], [-330, -52]];
+    const slots = [[-105, -28], [-195, 26], [-295, -50]];
     cops.slice(0, 3).forEach((cop, i) => {
-      if (Math.hypot(cop.x - car.x, cop.y - car.y) > 300) {
+      if (Math.hypot(cop.x - car.x, cop.y - car.y) > 320) {
         cop.x = car.x + slots[i][1]; cop.y = car.y + slots[i][0];
-        cop.angle = Math.PI / 2; cop.speed = 230;
+        cop.angle = Math.PI / 2; cop.speed = 305;
       }
     });
     p.heat = 3.6; p.x = car.x; p.y = car.y;

@@ -20,16 +20,18 @@ export function spawnPoliceCar(random, player) {
 /** Pursuit steering: aim at a point just ahead of the quarry; ram when close, shadow when far. */
 export function policeThink(car, dt, playerPos, playerSpeed) {
   const dist = Math.hypot(playerPos.x - car.x, playerPos.y - car.y);
-  const lead = clamp(dist / 300, 0, 0.6);
+  const lead = clamp(dist / 240, 0.15, 0.75);
   const tx = playerPos.x + (playerPos.vx || 0) * lead;
   const ty = playerPos.y + (playerPos.vy || 0) * lead;
-  // When far away, route via the nearest crossing so cruisers stay on streets.
-  const aim = dist > 620 ? nearestCrossing(car.x, car.y) : { x: tx, y: ty };
+  // When far away, route via the crossing nearest the quarry, so cruisers
+  // converge on the road the quarry is actually using instead of idling
+  // toward their own nearest corner.
+  const aim = dist > 620 ? nearestCrossing(tx, ty) : { x: tx, y: ty };
   const want = Math.atan2(aim.y - car.y, aim.x - car.x);
   let diff = want - car.angle;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  const steer = clamp(diff * 2.6, -1, 1);
+  const steer = clamp(diff * 3.0, -1, 1);
   let throttle = 1;
   if (Math.abs(diff) > 2.4) throttle = -0.7; // spun around: reverse out
   else if (dist < 60 && playerSpeed < 30) throttle = 0.2; // alongside a stopped quarry: hold

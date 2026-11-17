@@ -3,7 +3,7 @@
 // No drawing and no DOM here; main.js feeds input in and render.js paints
 // the state out. Events come back as flags so sound and screens stay loose.
 import { PLAYER, VIEW, WANTED, WORLD } from './config.js';
-import { createCity, collideCircle, districtAt } from './city.js';
+import { createCity, collideCircle, districtAt, nearestCrossing, onRoad } from './city.js';
 import { createCar, spawnParkedCars, spawnTraffic, driveCar, trafficThink, collideCars } from './vehicles.js';
 import { spawnPedestrians, stepPedestrian, createPedestrian } from './pedestrians.js';
 import { forceForStars, policeThink, spawnPoliceCar, stepOfficer, wantedStars } from './police.js';
@@ -23,8 +23,8 @@ export function createWorld(random, saved) {
     heat: 0, unseen: 0, bust: 0, dead: false, aimAngle: 0, walkPhase: 0, punchTimer: 0,
     shirt: '#ff6b35', skin: '#f2c9a0', speed: 0,
   };
-  const cars = [...spawnParkedCars(city, random, 26), ...spawnTraffic(random, 13)];
-  const peds = spawnPedestrians(random, 34);
+  const cars = [...spawnParkedCars(city, random, 30), ...spawnTraffic(random, 17)];
+  const peds = spawnPedestrians(random, 46);
   const state = {
     city, player, cars, peds, officers: [], thugs: [],
     combat: createCombat(), missions: M.createMissionState(saved),
@@ -199,6 +199,32 @@ export function createWorld(random, saved) {
       if (c === player.car || c.dead) continue;
       if (c.kind === 'traffic') {
         if (distance(c.x, c.y, player.x, player.y) > 1500) continue;
+        // Wedged-car recovery: collision shoves can ratchet a traffic car
+        // into an alley, a block interior, or sideways against a building
+        // face at an alley mouth — spots it can never drive out of, because
+        // every move resets against a wall. A healthy traffic car is never
+        // (off the road grid OR pressed within collision range of a
+        // building) while barely moving for three straight seconds — road
+        // lanes run 56+ units from every face and queues sit on lanes — so
+        // a car that matches is put back on the nearest crossing.
+        c.stuckT = (c.stuckT || 0) + dt;
+        if (c.stuckT >= 3) {
+          const moved = Math.hypot(c.x - (c.stuckX ?? c.x), c.y - (c.stuckY ?? c.y));
+          if (moved < 6) {
+            let pressed = !onRoad(c.x, c.y);
+            if (!pressed) for (const b of city.buildings) {
+              const dx = Math.max(b.x - c.x, 0, c.x - (b.x + b.w));
+              const dy = Math.max(b.y - c.y, 0, c.y - (b.y + b.h));
+              if (Math.hypot(dx, dy) < 26) { pressed = true; break; }
+            }
+            if (pressed) {
+              const cross = nearestCrossing(c.x, c.y);
+              c.x = cross.x; c.y = cross.y; c.speed = 0; c.target = null;
+              c.angle = Math.round(c.angle / (Math.PI / 2)) * (Math.PI / 2);
+            }
+          }
+          c.stuckX = c.x; c.stuckY = c.y; c.stuckT = 0;
+        }
         const t = trafficThink(c, dt, cars, random);
         driveCar(c, dt, t.throttle, t.steer);
       } else if (c.kind === 'police') { /* stepped below */ }

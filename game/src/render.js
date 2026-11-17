@@ -139,6 +139,22 @@ export function createRenderer(canvas) {
       ctx.beginPath(); ctx.arc(x + Math.cos(c.angle) * 22, y + Math.sin(c.angle) * 22 - 6, 6 + Math.sin(t * 7) * 2, 0, 6.29); ctx.fill();
     }
   }
+  /** Gulls circling the beach thermals — pure function of elapsed time. */
+  function drawGulls(state, x0, y0) {
+    const t = state.elapsed;
+    ctx.strokeStyle = 'rgba(247,243,227,0.9)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 7; i += 1) {
+      const cx = 3020 + Math.cos(t * 0.11 + i * 2.4) * (90 + i * 26);
+      const cy = 1120 + Math.sin(t * 0.14 + i * 1.9) * (60 + i * 17);
+      const x = cx - x0; const y = cy - y0;
+      if (x < -30 || y < -30 || x > VIEW.width + 30 || y > VIEW.height + 30) continue;
+      const flap = Math.sin(t * 6 + i * 1.7) * 3.4;
+      ctx.beginPath();
+      ctx.moveTo(x - 8, y + flap); ctx.quadraticCurveTo(x - 3, y - 3 - flap, x, y);
+      ctx.quadraticCurveTo(x + 3, y - 3 - flap, x + 8, y + flap);
+      ctx.stroke();
+    }
+  }
   function drawPerson(p, x0, y0, t, isPlayer) {
     const x = p.x - x0; const y = p.y - y0;
     const bob = p.speed || isPlayer ? Math.sin((p.walkPhase || t * 8)) * 1.6 : 0;
@@ -201,6 +217,7 @@ export function createRenderer(canvas) {
     for (const t of state.thugs) drawPerson(t, x0, y0, state.elapsed, false);
     for (const o of state.officers) drawPerson({ ...o, officer: true }, x0, y0, state.elapsed, false);
     if (!state.player.car) drawPerson(state.player, x0, y0, state.elapsed, true);
+    drawGulls(state, x0, y0);
     // bullets + particles
     ctx.strokeStyle = '#ffe9a8'; ctx.lineWidth = 2.4;
     for (const b of state.combat.bullets) {

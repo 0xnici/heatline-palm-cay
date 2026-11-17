@@ -21,7 +21,7 @@ export const CAR_MODELS = [
   { name: 'Vela Coupe', topSpeed: 398, accel: 268, grip: 3.9, len: 47, wid: 22, colors: ['#ef476f', '#118ab2', '#ffd166', '#22223b'] },
   { name: 'Dune Buggy', topSpeed: 268, accel: 232, grip: 2.4, len: 40, wid: 22, colors: ['#06d6a0', '#ff9f1c', '#c77dff', '#f4f1de'] },
 ];
-export const POLICE_MODEL = { name: 'PCPD Interceptor', topSpeed: 368, accel: 248, grip: 3.6, len: 48, wid: 23 };
+export const POLICE_MODEL = { name: 'PCPD Interceptor', topSpeed: 424, accel: 292, grip: 3.75, len: 48, wid: 23 };
 export const DISTRICTS = [
   { name: 'Coral Row', x: 0, y: 0, w: 1450, h: 1250 },
   { name: 'Downtown Cay', x: 1450, y: 0, w: 1200, h: 1250 },
