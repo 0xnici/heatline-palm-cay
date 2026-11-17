@@ -1,140 +1,236 @@
-// Cars: five civilian models plus the police interceptor. One physics step
-// serves the player, traffic and police — throttle, brake/reverse, steering
-// that bites harder at low speed, drag, and body damage from impacts.
-import { CAR_MODELS, POLICE_MODEL } from './config.js';
-import { AVENUES, STREETS, collideCircle } from './city.js';
-import { angleLerp, clamp, pickFrom } from './random.js';
+// vehicles.js — car entities, the shared arcade driving physics, the
+// traffic driver that follows the road grid, and the parked cars that
+// line the kerbs and lots. Police and the player drive through the same
+// physics, so a chase is fair: the law wins on pace, you win in corners.
 
-let nextId = 1;
-export function createCar(random, x, y, angle, kind) {
-  const model = kind === 'police' ? POLICE_MODEL : pickFrom(random, CAR_MODELS);
+import { CAR_MODELS, CIVILIAN_MODELS, CAR_PAINTS, LANE_OFF, ROAD_HALF, AVENUES, STREETS, WORLD_W, WORLD_H } from './config.js';
+import { clamp, angleDelta } from './rng.js';
+import { resolveCircle, groundAt } from './city.js';
+
+let nextCarId = 1;
+
+export function makeCar(modelKey, x, y, heading, rng, opts = {}) {
+  const spec = CAR_MODELS[modelKey];
   return {
-    id: nextId++, kind, model, color: kind === 'police' ? '#f4f6f8' : pickFrom(random, model.colors),
-    x, y, angle, speed: 0, health: 100, driver: kind === 'parked' ? null : 'ai',
-    steer: 0, throttle: 0, target: null, wait: 0, honk: 0, dead: false,
+    id: nextCarId++,
+    kind: 'car',
+    model: modelKey,
+    spec,
+    x, y, heading,
+    speed: 0,
+    hp: 100,
+    paint: opts.paint || (modelKey === 'interceptor' ? '#f2f2f2' : rng.pick(CAR_PAINTS)),
+    police: modelKey === 'interceptor',
+    parked: !!opts.parked,
+    driver: opts.parked ? 'none' : 'traffic',
+    route: null,       // traffic: { axis, idx, dir, crossAi, crossSi, decided }
+    stuckT: 0,
+    crashCooldown: 0,
+    dead: false,
   };
 }
-export function spawnParkedCars(city, random, count) {
-  const cars = [];
-  for (let i = 0; i < count && i < city.parkSpots.length * 2; i += 1) {
-    const avenue = pickFrom(random, AVENUES);
-    const y = 120 + random() * 2360;
-    if (STREETS.some((s) => Math.abs(y - s) < 80)) continue;
-    const side = random() < 0.5 ? -40 : 40;
-    // Parallel to the avenue, hugging the kerb — not across the driving lanes.
-    cars.push(createCar(random, avenue + side, y, side < 0 ? Math.PI / 2 : -Math.PI / 2, 'parked'));
+
+// Arcade step shared by everyone. control: { throttle 0..1, brake 0..1,
+// steer -1..1 }. Returns the impact speed if the car hit a building.
+export function stepCarPhysics(car, control, dt, city) {
+  const spec = car.spec;
+  const onSand = groundAt(city, car.x, car.y) === 'sand';
+  const topHere = spec.top * (onSand ? 0.5 : 1);
+
+  if (control.throttle > 0) {
+    const room = Math.max(0, 1 - car.speed / topHere);
+    car.speed += spec.accel * control.throttle * room * dt;
   }
-  return cars;
-}
-export function spawnTraffic(random, count) {
-  const cars = [];
-  for (let i = 0; i < count; i += 1) {
-    const vertical = random() < 0.5;
-    const a = pickFrom(random, vertical ? AVENUES : STREETS);
-    const along = 140 + random() * 2300;
-    const dir = random() < 0.5 ? 1 : -1;
-    const lane = 26 * dir;
-    const car = vertical
-      ? createCar(random, a + lane, along, dir > 0 ? Math.PI / 2 : -Math.PI / 2, 'traffic')
-      : createCar(random, along, a + lane, dir > 0 ? 0 : Math.PI, 'traffic');
-    car.speed = car.model.topSpeed * 0.4;
-    cars.push(car);
+  if (control.brake > 0) {
+    if (car.speed > 12) car.speed -= 340 * dt;
+    else car.speed = Math.max(car.speed - 120 * dt, -88);
   }
-  return cars;
-}
-/** Advance one car. input: {throttle -1..1, steer -1..1}. Returns impact speed or 0. */
-export function driveCar(car, dt, throttle, steer) {
-  const m = car.model;
-  const accel = throttle > 0 ? m.accel : m.accel * 0.62;
-  car.speed += throttle * accel * dt;
-  car.speed -= car.speed * 0.55 * dt; // drag + rolling resistance
-  if (throttle === 0) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 60 * dt);
-  const maxRev = m.topSpeed * 0.36;
-  car.speed = clamp(car.speed, -maxRev, m.topSpeed);
-  const steerAuthority = clamp(Math.abs(car.speed) / 60, 0, 1) * (car.speed < 0 ? -1 : 1);
-  car.angle += steer * m.grip * steerAuthority * dt * clamp(120 / (60 + Math.abs(car.speed)), 0.45, 1.6);
-  car.x += Math.cos(car.angle) * car.speed * dt;
-  car.y += Math.sin(car.angle) * car.speed * dt;
-  return Math.abs(car.speed);
-}
-/** Next traffic waypoint: the lane point at the next crossing along the
- * car's current road — or, sometimes, the lane point one crossing down the
- * crossing road. Every leg between two waypoints stays inside the union of
- * the two road strips, so traffic never cuts across a block corner. */
-function nextTrafficTarget(car, random) {
-  const vertical = Math.abs(Math.sin(car.angle)) >= Math.abs(Math.cos(car.angle));
-  const roads = vertical ? AVENUES : STREETS;
-  const cross = vertical ? STREETS : AVENUES;
-  const pos = vertical ? car.y : car.x;
-  const dir = vertical ? (Math.sin(car.angle) >= 0 ? 1 : -1) : (Math.cos(car.angle) >= 0 ? 1 : -1);
-  const road = roads.reduce((b, r) => (Math.abs(r - (vertical ? car.x : car.y)) < Math.abs(b - (vertical ? car.x : car.y)) ? r : b), roads[0]);
-  const ahead = cross.filter((c) => (c - pos) * dir > 30).sort((p, q) => (p - pos) * dir - (q - pos) * dir)[0];
-  if (ahead !== undefined && random() < 0.38) { // turn onto the crossing road
-    let dir2 = random() < 0.5 ? 1 : -1;
-    let next = roads.filter((r) => (r - (vertical ? car.x : car.y)) * dir2 > 30).sort((p, q) => (p - (vertical ? car.x : car.y)) * dir2 - (q - (vertical ? car.x : car.y)) * dir2)[0];
-    if (next === undefined) { dir2 = -dir2; next = roads.filter((r) => (r - (vertical ? car.x : car.y)) * dir2 > 30).sort((p, q) => (p - (vertical ? car.x : car.y)) * dir2 - (q - (vertical ? car.x : car.y)) * dir2)[0]; }
-    if (next !== undefined) return vertical ? { x: next, y: ahead + 26 * dir2 } : { x: ahead + 26 * dir2, y: next };
+  // Rolling drag and air drag.
+  car.speed -= car.speed * 0.22 * dt;
+  if (!control.throttle && !control.brake) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 26 * dt);
+
+  // Steering: authority peaks at city speed and fades as you go faster,
+  // which is what makes a hard corner the great equaliser in a chase.
+  const speedRatio = clamp(Math.abs(car.speed) / spec.top, 0, 1);
+  const authority = spec.grip * (1 - 0.52 * speedRatio);
+  const bite = clamp(car.speed / 130, -1, 1);
+  car.heading += control.steer * authority * bite * dt;
+
+  const prevX = car.x, prevY = car.y;
+  car.x += Math.cos(car.heading) * car.speed * dt;
+  car.y += Math.sin(car.heading) * car.speed * dt;
+
+  // The sea is a wall to cars, and so is the edge of the world: slide
+  // along both, shedding speed, never through them.
+  if (groundAt(city, car.x, car.y) === 'water') {
+    car.x = prevX;
+    if (groundAt(city, car.x, car.y) === 'water') car.y = prevY;
+    car.speed *= 0.4;
   }
-  if (ahead !== undefined) return vertical ? { x: road + 26 * dir, y: ahead } : { x: ahead, y: road + 26 * dir };
-  // The road runs out: U-turn at the last crossing behind, on the far lane.
-  const behind = cross.filter((c) => (c - pos) * dir < -30).sort((p, q) => (q - pos) * dir - (p - pos) * dir)[0];
-  if (behind !== undefined) return vertical ? { x: road - 26 * dir, y: behind } : { x: behind, y: road - 26 * dir };
-  return vertical ? { x: road + 26 * dir, y: pos + 260 * dir } : { x: pos + 260 * dir, y: road + 26 * dir };
-}
-/** Traffic brain: follow the road grid waypoint to waypoint, holding the
- * lane line, easing into turns, and slowing for the car ahead. */
-export function trafficThink(car, dt, cars, random) {
-  let throttle = 0.72; let steer = 0;
-  if (!car.target || Math.hypot(car.target.x - car.x, car.target.y - car.y) < 70) {
-    car.target = nextTrafficTarget(car, random);
+  if (car.x < 18 || car.x > WORLD_W - 18 || car.y < 18 || car.y > WORLD_H - 18) {
+    car.x = clamp(car.x, 18, WORLD_W - 18);
+    car.y = clamp(car.y, 18, WORLD_H - 18);
+    car.speed *= 0.5;
   }
-  const want = Math.atan2(car.target.y - car.y, car.target.x - car.x);
-  let diff = want - car.angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  steer = clamp(diff * 2.4, -1, 1);
-  if (Math.abs(diff) > 1.1) throttle = 0.05; // near-stop swing: U-turns stay on the road
-  else if (Math.abs(diff) > 0.55) throttle = 0.35; // ease off while the nose comes round
+
+  let impact = 0;
+  const before = car.speed;
+  if (resolveCircle(city, car, 17)) {
+    impact = Math.abs(before);
+    car.speed = -before * 0.22;
+    car.hp -= impact * 0.16;
+  }
+  if (car.crashCooldown > 0) car.crashCooldown -= dt;
+  return impact;
+}
+
+// ---- traffic -----------------------------------------------------------
+
+// Start a car on a road leg: axis 'v' rides an avenue, 'h' a street.
+export function startLeg(car, axis, idx, dir, rng) {
+  car.route = { axis, idx, dir, decided: false };
+  if (axis === 'v') {
+    car.x = AVENUES[idx] - dir * LANE_OFF;
+    car.heading = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+  } else {
+    car.y = STREETS[idx] + dir * LANE_OFF;
+    car.heading = dir > 0 ? 0 : Math.PI;
+  }
+}
+
+// The crossing this leg is heading for, and the aim point on our lane.
+function legTarget(car, city) {
+  const r = car.route;
+  if (r.axis === 'v') {
+    let si = -1;
+    for (let i = 0; i < STREETS.length; i++) {
+      if ((STREETS[i] - car.y) * r.dir > -20) { si = i; break; }
+    }
+    if (si === -1) si = r.dir > 0 ? STREETS.length - 1 : 0;
+    return { cx: AVENUES[r.idx], cy: STREETS[si], ai: r.idx, si, x: AVENUES[r.idx] - r.dir * LANE_OFF, y: STREETS[si] };
+  }
+  let ai = -1;
+  for (let i = 0; i < AVENUES.length; i++) {
+    if ((AVENUES[i] - car.x) * r.dir > -20) { ai = i; break; }
+  }
+  if (ai === -1) ai = r.dir > 0 ? AVENUES.length - 1 : 0;
+  return { cx: AVENUES[ai], cy: STREETS[r.idx], ai, si: r.idx, x: AVENUES[ai], y: STREETS[r.idx] + r.dir * LANE_OFF };
+}
+
+export function driveTraffic(car, dt, city, cars, rng) {
+  if (!car.route) startLeg(car, 'v', rng.int(0, AVENUES.length - 1), rng.pick([1, -1]), rng);
+  const r = car.route;
+  const t = legTarget(car, city);
+  const distCross = Math.hypot(t.cx - car.x, t.cy - car.y);
+
+  // Decide this crossing's move once, early enough to swing wide.
+  if (!r.decided && distCross < 150) {
+    r.decided = true;
+    const roll = rng.next();
+    r.action = roll < 0.52 ? 'straight' : roll < 0.76 ? 'left' : 'right';
+    if ((r.axis === 'v' && ((r.idx === 0 && r.action === 'left' && r.dir > 0) || (r.idx === AVENUES.length - 1 && r.action === 'right' && r.dir > 0))) ||
+        (r.axis === 'h' && ((r.idx === 0 && r.action === 'right' && r.dir > 0) || (r.idx === STREETS.length - 1 && r.action === 'left' && r.dir > 0)))) {
+      r.action = 'straight';
+    }
+  }
+
+  // Aim point: our lane at the crossing, or swung onto the exit lane
+  // when a turn is decided. New heading after the turn: the right
+  // vector of travel for a right turn, its negation for a left.
+  let aimX = t.x, aimY = t.y;
+  let newHeading = null;
+  if (r.decided && r.action !== 'straight') {
+    const hx = r.axis === 'v' ? 0 : r.dir;
+    const hy = r.axis === 'v' ? r.dir : 0;
+    const turn = r.action === 'right' ? 1 : -1;
+    newHeading = turn === 1 ? { x: -hy, y: hx } : { x: hy, y: -hx };
+    if (newHeading.x !== 0) {
+      aimX = t.cx + newHeading.x * 170;
+      aimY = STREETS[t.si] + newHeading.x * LANE_OFF;
+    } else {
+      aimX = AVENUES[t.ai] - newHeading.y * LANE_OFF;
+      aimY = t.cy + newHeading.y * 170;
+    }
+  }
+
+  const desired = Math.atan2(aimY - car.y, aimX - car.x);
+  const steer = clamp(angleDelta(car.heading, desired) * 2.4, -1, 1);
+
+  // Speed: cruise, slower for a turn, and keep off the car in front.
+  let target = Math.min(car.spec.top * 0.4, 148);
+  if (r.decided && r.action !== 'straight' && distCross < 130) target = 74;
+  const fx = Math.cos(car.heading), fy = Math.sin(car.heading);
   for (const other of cars) {
     if (other === car || other.dead) continue;
-    const fx = car.x + Math.cos(car.angle) * 62; const fy = car.y + Math.sin(car.angle) * 62;
-    if (Math.hypot(other.x - fx, other.y - fy) < 40) { throttle = -0.4; break; }
-    if (Math.hypot(other.x - car.x, other.y - car.y) < 56) throttle = Math.min(throttle, 0.1);
-  }
-  if (car.wait > 0) { car.wait -= dt; throttle = -0.2; }
-  return { throttle, steer };
-}
-/** Circle-vs-car and car-vs-car shoves with damage; returns worst impact for the player car. */
-export function collideCars(cars, city, playerCar) {
-  let playerImpact = 0;
-  for (const car of cars) {
-    if (car.dead) continue;
-    const before = { x: car.x, y: car.y };
-    collideCircle(city, car, 24);
-    if (car.hitWall) {
-      car.hitWall = false;
-      const impact = Math.abs(car.speed);
-      if (impact > 90) { car.health -= impact * 0.12; if (car === playerCar) playerImpact = Math.max(playerImpact, impact); }
-      car.speed *= -0.25; car.x = before.x; car.y = before.y;
-      collideCircle(city, car, 24); car.hitWall = false;
+    const rx = other.x - car.x, ry = other.y - car.y;
+    const ahead = rx * fx + ry * fy;
+    const side = Math.abs(rx * -fy + ry * fx);
+    if (ahead > 0 && ahead < 58 && side < 17) {
+      target = Math.min(target, Math.max(0, other.speed) * (ahead < 30 ? 0 : 0.92));
     }
   }
-  for (let i = 0; i < cars.length; i += 1) for (let j = i + 1; j < cars.length; j += 1) {
-    const a = cars[i]; const b = cars[j];
-    if (a.dead || b.dead) continue;
-    const dx = b.x - a.x; const dy = b.y - a.y; const d = Math.hypot(dx, dy);
-    if (d > 0.01 && d < 46) {
-      const push = (46 - d) / 2; const nx = dx / d; const ny = dy / d;
-      a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
-      const rel = Math.abs(a.speed - b.speed) + Math.abs(a.speed) * 0.2;
-      if (rel > 70) {
-        a.health -= rel * 0.08; b.health -= rel * 0.08;
-        if (a === playerCar || b === playerCar) playerImpact = Math.max(playerImpact, rel);
-        a.speed *= 0.55; b.speed *= 0.55;
-      }
+  const control = {
+    throttle: car.speed < target ? 0.85 : 0,
+    brake: car.speed > target + 24 ? 0.7 : 0,
+    steer,
+  };
+  const impact = stepCarPhysics(car, control, dt, city);
+
+  // Arrived at the crossing: commit the decided move.
+  const passed = r.axis === 'v' ? (car.y - t.cy) * r.dir > 14 : (car.x - t.cx) * r.dir > 14;
+  if (passed) {
+    if (!r.decided || r.action === 'straight') {
+      const nr = { axis: r.axis, idx: r.idx, dir: r.dir, decided: false };
+      // Fell off the end of a road: turn around onto the same road.
+      const beyond = r.axis === 'v'
+        ? (r.dir > 0 && t.si === STREETS.length - 1) || (r.dir < 0 && t.si === 0)
+        : (r.dir > 0 && t.ai === AVENUES.length - 1) || (r.dir < 0 && t.ai === 0);
+      if (beyond) nr.dir = -r.dir;
+      car.route = nr;
+    } else if (newHeading) {
+      if (newHeading.x !== 0) car.route = { axis: 'h', idx: t.si, dir: newHeading.x, decided: false };
+      else car.route = { axis: 'v', idx: t.ai, dir: newHeading.y, decided: false };
     }
   }
-  for (const car of cars) if (car.health <= 0 && !car.dead) { car.dead = true; car.speed = 0; }
-  return playerImpact;
+
+  // Wedged recovery: barely moved for 3 s while trying to drive.
+  if (Math.abs(car.speed) < 6 && control.throttle > 0) {
+    car.stuckT += dt;
+    if (car.stuckT > 3) {
+      car.stuckT = 0;
+      const c = city.crossings.reduce((a, b) =>
+        (Math.hypot(b.x - car.x, b.y - car.y) < Math.hypot(a.x - car.x, a.y - car.y) ? b : a));
+      if (car.route.axis === 'v') { car.x = AVENUES[car.route.idx] - car.route.dir * LANE_OFF; car.y = c.y - car.route.dir * 120; }
+      else { car.y = STREETS[car.route.idx] + car.route.dir * LANE_OFF; car.x = c.x - car.route.dir * 120; }
+      car.speed = 40;
+    }
+  } else car.stuckT = 0;
+
+  return impact;
 }
-export { angleLerp };
+
+// Parked cars: neat rows in the lots, parallel at the kerbs elsewhere.
+export function spawnParked(city, rng, count) {
+  const cars = [];
+  for (const lot of city.lots) {
+    const n = rng.int(2, 4);
+    for (let i = 0; i < n; i++) {
+      const x = lot.x + 30 + i * 58;
+      const y = lot.y + 30;
+      if (x < lot.x + lot.w - 20) cars.push(makeCar(rng.pick(CIVILIAN_MODELS), x, y, Math.PI / 2, rng, { parked: true }));
+    }
+  }
+  const kerbAvenues = [820, 1340, 2380, 3200];
+  for (const ax of kerbAvenues) {
+    for (let i = 0; i < count / kerbAvenues.length; i++) {
+      const y = rng.range(120, 2480);
+      let nearCross = false;
+      for (const s of STREETS) if (Math.abs(y - s) < 84) nearCross = true;
+      if (nearCross) continue;
+      const side = rng.pick([1, -1]);
+      const car = makeCar(rng.pick(CIVILIAN_MODELS), ax + side * (ROAD_HALF - 13), y, side > 0 ? Math.PI / 2 : -Math.PI / 2, rng, { parked: true });
+      cars.push(car);
+    }
+  }
+  return cars;
+}

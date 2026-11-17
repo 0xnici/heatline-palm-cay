@@ -1,121 +1,371 @@
-// The story of HEATLINE: five jobs from three fixers, chained in order, plus
-// repeatable taxi fares and the hidden-package hunt. Each job is a list of
-// stages; the world steps the current stage and this module judges it done.
-// Stage kinds: goto, pickup, deliver (timed), escape, shootout, getaway.
-export const JOBS = [
-  {
-    id: 'paper-trail', fixer: 0, title: 'Paper Trail',
-    intro: ['Marisol Vega: A courier dropped a ledger in Coral Row.', 'Marisol Vega: Pick it up, bring it to the marina. No noise.'],
-    cash: 450, respect: 6,
-    stages: [
-      { kind: 'goto', x: 910, y: 310, label: 'Reach the dropped ledger in Coral Row' },
-      { kind: 'pickup', x: 910, y: 310, label: 'Grab the ledger', seconds: 3 },
-      { kind: 'deliver', x: 2105, y: 1310, label: 'Deliver the ledger to Marisol at Marina Verde', seconds: 95 },
-    ],
-    done: 'Marisol Vega: Clean work. The Cay remembers clean work.',
-  },
-  {
-    id: 'cold-storage', fixer: 1, title: 'Cold Storage',
-    intro: ['Big Tuna Russo: My freezer truck got lifted to the Cannery.', 'Big Tuna Russo: Take it back and park it behind the cannery.'],
-    cash: 800, respect: 9,
-    stages: [
-      { kind: 'goto', x: 700, y: 1240, label: 'Reach the stolen freezer truck in Old Cannery' },
-      { kind: 'deliver', x: 1150, y: 1810, label: 'Park the truck behind the cannery', seconds: 110, needCar: true },
-    ],
-    done: 'Big Tuna Russo: Ice cold, kid. You are earning the name.',
-  },
-  {
-    id: 'sermon', fixer: 2, title: 'Sermon on the Beach',
-    intro: ['Pastor Kane: A beach preacher owes the Row. He runs at noon.', 'Pastor Kane: Scare him straight — then lose the heat he calls in.'],
-    cash: 1100, respect: 12,
-    stages: [
-      { kind: 'goto', x: 3010, y: 900, label: 'Confront the preacher on Palm Beach' },
-      { kind: 'shootout', x: 3010, y: 900, label: 'Fight off the preacher’s crew', count: 3 },
-      { kind: 'escape', label: 'Lose the heat — get out of sight until the stars fade' },
-    ],
-    done: 'Pastor Kane: The Row breathes easier tonight.',
-  },
-  {
-    id: 'harbour-lights', fixer: 0, title: 'Harbour Lights',
-    intro: ['Marisol Vega: A buyer waits at the marina with harbour money.', 'Marisol Vega: Escort the package. Her rivals know the route.'],
-    cash: 1700, respect: 16,
-    stages: [
-      { kind: 'pickup', x: 1510, y: 810, label: 'Collect the package in Downtown Cay', seconds: 3 },
-      { kind: 'shootout', x: 2040, y: 1240, label: 'Ambush! Drop the rival crew', count: 4 },
-      { kind: 'deliver', x: 2105, y: 1810, label: 'Deliver to the buyer at the marina', seconds: 100 },
-    ],
-    done: 'Marisol Vega: Harbour lights, harbour money. Beautiful.',
-  },
-  {
-    id: 'heatline', fixer: 1, title: 'The Heatline Run',
-    intro: ['Big Tuna Russo: One last run. Every badge in the Cay will come.', 'Big Tuna Russo: Grab the Cay Bank strongbox and reach the beach house.'],
-    cash: 3200, respect: 30,
-    stages: [
-      { kind: 'pickup', x: 1700, y: 810, label: 'Take the strongbox outside Cay Bank', seconds: 4, crime: 3 },
-      { kind: 'getaway', x: 3050, y: 2250, label: 'Reach the beach house — whatever it takes', seconds: 150 },
-      { kind: 'escape', label: 'Shake the last of the heat' },
-    ],
-    done: 'Big Tuna Russo: You just ran the Heatline, kid. Palm Cay is yours.',
-  },
-];
-export const TAXI_SPOTS = [
-  [330, 330], [1470, 330], [2130, 330], [330, 1330], [2130, 1330], [2670, 1830], [930, 2330], [2130, 2330], [2970, 1330],
-];
-export function createMissionState(saved) {
+// missions.js — the work of Palm Cay: a five-job story chain dealt out
+// by three fixers, repeatable taxi fares, and twelve hidden packages.
+// A job is a list of stages; each stage knows its marker, its clock and
+// the moment it is done. Failing a stage fails the job, never the game:
+// the fixer will deal it again.
+
+import { WATER_X } from './config.js';
+import { dist } from './rng.js';
+import { addHeat, holdHeat } from './police.js';
+import { makeCar } from './vehicles.js';
+import { sfx } from './audio.js';
+
+// ---- stage helpers -----------------------------------------------------
+
+// Walk or drive to a point. foot: the player must arrive on foot.
+function reach(x, y, r = 42, opts = {}) {
   return {
-    jobIndex: saved?.jobIndex ?? 0, stageIndex: 0, active: false, stage: null,
-    timer: 0, stageTime: 0, kills: 0, card: null, taxi: null, storyDone: saved?.storyDone ?? false,
-    packagesFound: saved?.packagesFound ?? 0,
+    marker: { x, y },
+    time: opts.time || null,
+    say: opts.say || null,
+    tick(G) {
+      if (opts.foot && G.player.car) return null;
+      const p = G.player.car || G.player;
+      return dist(p.x, p.y, x, y) < r ? 'done' : null;
+    },
   };
 }
-export function currentJob(state) { return state.storyDone ? null : JOBS[state.jobIndex] || null; }
-export function jobMarker(state) {
-  const job = currentJob(state);
-  if (!job) return null;
-  if (!state.active) {
-    const first = job.stages[0];
-    return { x: first.x ?? 1560, y: first.y ?? 900, label: `${job.title} — meet your fixer`, job };
+
+function fixerSpot(G, id) {
+  return G.city.fixers.find((f) => f.id === id);
+}
+
+// ---- the five jobs -------------------------------------------------------
+
+function jobPaperTrail(G) {
+  const ledger = { x: 761, y: 1939 };
+  const marisol = fixerSpot(G, 'marisol');
+  return {
+    fixer: 'marisol', title: 'Paper Trail',
+    intro: [
+      'A cannery ledger walked out of the Old Cannery last night, and it names people who pay me to forget names.',
+      'It is sitting in a crate by the south warehouses. Bring it to my café — and if the drive back gets loud, that is your problem, not mine.',
+    ],
+    reward: { cash: 450, respect: 12 },
+    stages: [
+      { text: 'Pick up the ledger in the Old Cannery', ...reach(ledger.x, ledger.y, 40, { foot: true }) },
+      {
+        text: 'Deliver the ledger to Marisol — Café Brisa',
+        ...reach(marisol.x, marisol.y, 52, { time: 150 }),
+        say: 'Two minutes of quiet driving. That is all I ask.',
+      },
+    ],
+  };
+}
+
+function jobColdStorage(G) {
+  const tuna = fixerSpot(G, 'tuna');
+  const truckSpot = { x: 2704, y: 2300 + 34 };
+  return {
+    fixer: 'tuna', title: 'Cold Storage',
+    intro: [
+      'A freezer truck full of "shrimp" is parked on the south street with the keys in it. The shrimp is not shrimp.',
+      'Take it, bring it to my warehouses by the marina. You scratch it, you own the shrimp.',
+    ],
+    reward: { cash: 800, respect: 18 },
+    stages: [
+      {
+        text: 'Steal the freezer truck on the south street',
+        marker: truckSpot,
+        setup(G2) {
+          const truck = makeCar('truck', truckSpot.x, truckSpot.y, 0, G2.rng, { parked: true });
+          truck.paint = '#dfe8ea';
+          G2.cars.push(truck);
+          this.truckId = truck.id;
+        },
+        tick(G2) {
+          const truck = G2.cars.find((c) => c.id === this.truckId);
+          if (!truck || truck.dead) return 'fail';
+          if (G2.player.car === truck) { addHeat(G2.law, 170); return 'done'; }
+          this.marker = { x: truck.x, y: truck.y };
+          return null;
+        },
+      },
+      {
+        text: 'Deliver the truck to Big Tuna’s warehouses',
+        ...reach(tuna.x, tuna.y, 64),
+        tick(G2) {
+          const truck = G2.cars.find((c) => c.id === G2.mission.data.truckId);
+          if (!truck || truck.dead) return 'fail';
+          return G2.player.car === truck && dist(truck.x, truck.y, tuna.x, tuna.y) < 64 ? 'done' : null;
+        },
+      },
+    ],
+  };
+}
+
+function jobBeachBusiness(G) {
+  const meet = { x: 3348, y: 1180 };
+  const marisol = fixerSpot(G, 'marisol');
+  return {
+    fixer: 'marisol', title: 'Beach Business',
+    intro: [
+      'A crew from the mainland thinks my beach is their beach now. Meet me on the sand at Palm Beach.',
+      'Correct their thinking. Then lose the police and come tell me how it went.',
+    ],
+    reward: { cash: 1100, respect: 24 },
+    stages: [
+      { text: 'Meet Marisol’s people on Palm Beach', ...reach(meet.x, meet.y, 48, { foot: true }) },
+      {
+        text: 'Drive off the mainland crew',
+        marker: meet,
+        setup(G2) {
+          const spots = [[3260, 1090], [3380, 1260], [3290, 1330]];
+          G2.hostiles = spots.map(([x, y]) => ({
+            kind: 'crew', x, y, heading: Math.PI, hp: 60, shootCd: 1, dead: false,
+          }));
+          addHeat(G2.law, 60);
+        },
+        tick(G2) {
+          return G2.hostiles.every((h) => h.dead) ? 'done' : null;
+        },
+      },
+      {
+        text: 'Lose the heat, then report to Marisol',
+        marker: { x: marisol.x, y: marisol.y },
+        setup(G2) { addHeat(G2.law, 200); },
+        tick(G2) {
+          if (G2.stars > 1) { this.marker = null; return null; }
+          this.marker = { x: marisol.x, y: marisol.y };
+          const p = G2.player.car || G2.player;
+          return dist(p.x, p.y, marisol.x, marisol.y) < 52 ? 'done' : null;
+        },
+      },
+    ],
+  };
+}
+
+function jobOfferingRun(G) {
+  const kane = fixerSpot(G, 'kane');
+  const safehouse = { x: 1340, y: 906 };
+  return {
+    fixer: 'kane', title: 'The Offering Run',
+    intro: [
+      'My aide carries the chapel’s offering across town tonight, and there are men who would tithe it for themselves.',
+      'Pick him up at the chapel. Drive him to the safehouse on the north street. Keep the car whole, keep him breathing.',
+    ],
+    reward: { cash: 1400, respect: 30 },
+    stages: [
+      { text: 'Pick up Pastor Kane’s aide at the chapel', ...reach(kane.x, kane.y, 46, { foot: true }) },
+      {
+        text: 'Get the aide into a car',
+        marker: { x: kane.x, y: kane.y },
+        tick(G2) { return G2.player.car ? 'done' : null; },
+      },
+      {
+        text: 'Drive the aide to the safehouse — watch for an ambush',
+        ...reach(safehouse.x, safehouse.y, 58),
+        setup(G2) {
+          for (const [x, y] of [[2050, 2050], [900, 1600]]) {
+            const car = makeCar('sedan', x, y, 0, G2.rng, { paint: '#22252a' });
+            car.driver = 'hostile';
+            G2.cars.push(car);
+          }
+          G2.say('kane', 'They are coming up behind you, child. Drive.');
+        },
+      },
+    ],
+  };
+}
+
+function jobStrongbox(G) {
+  const bank = { x: 1926, y: 1426 };
+  const pierTip = { x: WATER_X + 168, y: 2160 };
+  const tuna = fixerSpot(G, 'tuna');
+  return {
+    fixer: 'tuna', title: 'The Strongbox',
+    intro: [
+      'Last job, biggest noise. The Banco del Cay strongbox, out the back door, onto my boat at the marina.',
+      'Every badge in the Cay will come. Walk it down the pier yourself — boats do not wait, and neither do I.',
+    ],
+    reward: { cash: 3000, respect: 50 },
+    stages: [
+      { text: 'Take the strongbox behind Banco del Cay', ...reach(bank.x, bank.y, 44, { foot: true }) },
+      {
+        text: 'Carry the strongbox to the boat at the marina pier',
+        ...reach(pierTip.x, pierTip.y, 34, { foot: true, time: 260 }),
+        setup(G2) {
+          G2.law.heat = Math.max(G2.law.heat, 400);
+          holdHeat(G2.law, 18);
+          G2.say('tuna', 'That is the whole Cay PD behind you. The pier. Now.');
+        },
+      },
+      { text: 'Report to Big Tuna', ...reach(tuna.x, tuna.y, 56) },
+    ],
+  };
+}
+
+export const JOB_BUILDERS = [jobPaperTrail, jobColdStorage, jobBeachBusiness, jobOfferingRun, jobStrongbox];
+
+// ---- mission runtime -----------------------------------------------------
+
+export function createMissionState() {
+  return { jobIndex: 0, active: null, stageIdx: 0, stageT: 0, timeLeft: null, data: {}, done: false };
+}
+
+export function startJob(G, jobDef) {
+  G.mission.active = jobDef;
+  G.mission.stageIdx = 0;
+  G.mission.data = {};
+  beginStage(G);
+  G.showCard({
+    title: jobDef.title,
+    subtitle: fixerSpot(G, jobDef.fixer).name,
+    lines: jobDef.intro,
+    foot: `Reward $${jobDef.reward.cash} · +${jobDef.reward.respect} respect — Enter to take the job`,
+  });
+}
+
+function beginStage(G) {
+  const m = G.mission;
+  const stage = m.active.stages[m.stageIdx];
+  m.stageT = 0;
+  m.timeLeft = stage.time || null;
+  if (stage.setup) stage.setup(G);
+  if (stage.say) G.say(m.active.fixer, stage.say);
+}
+
+export function currentStage(G) {
+  const m = G.mission;
+  return m.active ? m.active.stages[m.stageIdx] : null;
+}
+
+export function currentMarker(G) {
+  const s = currentStage(G);
+  if (!s) return null;
+  return typeof s.marker === 'function' ? s.marker(G) : s.marker;
+}
+
+export function failJob(G, why) {
+  const title = G.mission.active.title;
+  G.mission.active = null;
+  G.hostiles = G.hostiles.filter((h) => h.dead);
+  G.showCard({ title: 'Job failed', subtitle: title, lines: [why], foot: 'The fixer will deal it again — Enter' });
+  sfx('wasted');
+}
+
+export function updateMission(G, dt) {
+  const m = G.mission;
+  if (!m.active) return;
+  const stage = currentStage(G);
+  m.stageT += dt;
+  if (m.timeLeft !== null) {
+    m.timeLeft -= dt;
+    if (m.timeLeft <= 0) { failJob(G, 'Out of time. The moment passed, and moments do not come back.'); return; }
   }
-  const s = state.stage;
-  if (!s || s.x === undefined) return null;
-  return { x: s.x, y: s.y, label: s.label, job };
-}
-export function startJob(state) {
-  const job = currentJob(state);
-  if (!job) return null;
-  state.active = true; state.stageIndex = 0; state.kills = 0;
-  state.stage = job.stages[0]; state.timer = job.stages[0].seconds || 0; state.stageTime = 0;
-  return { title: job.title, lines: job.intro };
-}
-export function advanceStage(state) {
-  const job = currentJob(state);
-  state.stageIndex += 1; state.kills = 0; state.stageTime = 0;
-  if (state.stageIndex >= job.stages.length) {
-    state.active = false; state.stage = null;
-    const reward = { cash: job.cash, respect: job.respect, line: job.done, title: job.title };
-    state.jobIndex += 1;
-    if (state.jobIndex >= JOBS.length) state.storyDone = true;
-    return { completed: reward };
+  // Keep cross-stage references: the truck's id lives on mission data.
+  if (stage.truckId) m.data.truckId = stage.truckId;
+  const result = stage.tick ? stage.tick(G) : null;
+  if (result === 'fail') { failJob(G, 'The job fell apart. What is broken cannot be delivered.'); return; }
+  if (result === 'done') {
+    m.stageIdx++;
+    sfx('pickup');
+    if (m.stageIdx >= m.active.stages.length) {
+      const job = m.active;
+      m.active = null;
+      m.jobIndex++;
+      G.cash += job.reward.cash;
+      G.respect += job.reward.respect;
+      sfx('job');
+      if (m.jobIndex >= JOB_BUILDERS.length) {
+        m.done = true;
+        G.showEnding();
+      } else {
+        G.showCard({
+          title: 'Job complete', subtitle: job.title,
+          lines: [`$${job.reward.cash} and the respect of ${fixerSpot(G, job.fixer).name}. Palm Cay provides.`],
+          foot: 'Enter',
+        });
+      }
+      G.saveGame();
+    } else {
+      beginStage(G);
+    }
   }
-  state.stage = job.stages[state.stageIndex];
-  state.timer = state.stage.seconds || 0;
-  return { next: state.stage };
 }
-export function failJob(state, why) {
-  state.active = false; state.stage = null; state.stageIndex = 0;
-  return { failed: why };
+
+// The next job is offered at its fixer's spot, when no job is active.
+export function offeredFixer(G) {
+  const m = G.mission;
+  if (m.active || m.done || m.jobIndex >= JOB_BUILDERS.length) return null;
+  const probe = JOB_BUILDERS[m.jobIndex](G);
+  return { fixer: fixerSpot(G, probe.fixer), def: probe };
 }
-export function objectiveText(state) {
-  if (state.taxi) return `Taxi fare: drop your passenger at the flag — $${state.taxi.fare} on the meter`;
-  if (!state.active) {
-    const job = currentJob(state);
-    if (job) return `Find the ◆ marker: ${job.title} (${job.fixersName || ''}job ${state.jobIndex + 1} of ${JOBS.length})`;
-    return 'Story complete. Run taxi fares, hunt packages, rule the Cay.';
+
+// ---- taxi fares ------------------------------------------------------------
+
+export function createTaxiState() {
+  return { phase: 'idle', coolT: 8, x: 0, y: 0, destX: 0, destY: 0, dist: 0, waitT: 0 };
+}
+
+export function updateTaxi(G, dt, rng) {
+  const t = G.taxi;
+  const pl = G.player;
+  if (G.mission.active) return;
+  if (t.phase === 'idle') {
+    t.coolT -= dt;
+    if (t.coolT <= 0 && pl.car && !pl.car.police) {
+      const a = rng.range(0, Math.PI * 2);
+      const d = rng.range(420, 760);
+      t.x = Math.max(60, Math.min(3240, pl.car.x + Math.cos(a) * d));
+      t.y = Math.max(60, Math.min(2540, pl.car.y + Math.sin(a) * d));
+      t.phase = 'offer';
+    }
+    return;
   }
-  const s = state.stage;
-  let text = s.label;
-  if (s.kind === 'shootout') text += ` — ${state.kills}/${s.count} down`;
-  if (state.timer > 0) text += ` — ${Math.ceil(state.timer)}s`;
-  if (s.kind === 'escape') text += ' — stay unseen';
-  return text;
+  if (t.phase === 'offer') {
+    if (!pl.car) { t.phase = 'idle'; t.coolT = 10; return; }
+    if (dist(pl.car.x, pl.car.y, t.x, t.y) < 34 && Math.abs(pl.car.speed) < 14) {
+      t.waitT += dt;
+      if (t.waitT > 0.7) {
+        t.phase = 'ride';
+        t.waitT = 0;
+        const a = rng.range(0, Math.PI * 2);
+        const d = rng.range(650, 1350);
+        t.destX = Math.max(60, Math.min(3240, t.x + Math.cos(a) * d));
+        t.destY = Math.max(60, Math.min(2540, t.y + Math.sin(a) * d));
+        t.dist = d;
+        sfx('door');
+        G.say(null, 'Thanks, friend. Step on it and the tip grows.');
+      }
+    } else t.waitT = 0;
+    return;
+  }
+  // phase ride
+  if (!pl.car) {
+    t.phase = 'idle'; t.coolT = 14;
+    G.say(null, 'The fare walked away. Fares do that when the car stops being a car they are in.');
+    return;
+  }
+  if (dist(pl.car.x, pl.car.y, t.destX, t.destY) < 40 && Math.abs(pl.car.speed) < 20) {
+    const pay = Math.round(35 + t.dist * 0.085 + rng.range(0, 22));
+    G.cash += pay;
+    G.respect += 1;
+    sfx('cash');
+    G.floatText(`+$${pay} fare`, pl.car.x, pl.car.y - 30);
+    t.phase = 'idle';
+    t.coolT = rng.range(14, 26);
+  }
+}
+
+// ---- hidden packages ---------------------------------------------------------
+
+export function updatePackages(G) {
+  const p = G.player.car || G.player;
+  for (const pack of G.city.packages) {
+    if (pack.taken) continue;
+    if (dist(p.x, p.y, pack.x, pack.y) < 27) {
+      pack.taken = true;
+      G.cash += 200;
+      G.respect += 2;
+      G.packagesFound++;
+      sfx('pickup');
+      G.floatText('Hidden package +$200', pack.x, pack.y - 24);
+      if (G.packagesFound === G.city.packages.length) {
+        G.cash += 1000;
+        G.floatText('All packages! +$1000 bonus', p.x, p.y - 44);
+      }
+      G.saveGame();
+    }
+  }
 }

@@ -1,93 +1,61 @@
-// Boot and the one loop for HEATLINE: Palm Cay. Fixed-step simulation,
-// screens (title, play, pause, mission cards, busted, wasted), localStorage
-// saves with Continue, and the ?shot= staging used for the screenshots.
-import { STEP, SAVE_KEY } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EV_BUSTED, EV_WASTED, EV_CARD } from './world.js';
-import { createInput, ACT_PAUSE, ACT_CONFIRM } from './input.js';
-import { createAudio } from './audio.js';
-import { createRenderer, SCREEN_TITLE, SCREEN_PLAY, SCREEN_PAUSED, SCREEN_CARD, SCREEN_BUSTED, SCREEN_WASTED } from './render.js';
+// main.js — boot and the frame loop. Builds the game, binds input,
+// runs the simulation at a clamped step, draws the world, the HUD and
+// whichever screen the mode calls for. In ?shot= mode it stages one of
+// the deterministic scenes instead and holds the frame for capture.
+
+import { createGame, stepGame, startRun, dismissCard } from './world.js';
+import { drawWorld } from './render.js';
+import { drawHUD, drawMenus } from './hud.js';
+import { bindInput, endFrameInput, keyPressed } from './input.js';
+import { toggleMute } from './audio.js';
 import { stageShot } from './shots.js';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : 20261117;
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const audio = createAudio();
+const ctx = canvas.getContext('2d');
 
-function readSave() {
-  try { const raw = window.localStorage.getItem(SAVE_KEY); return raw ? JSON.parse(raw) : null; }
-  catch { return null; }
-}
-function writeSave(world) {
-  try {
-    const s = world.state;
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      cash: s.player.cash, respect: s.player.respect,
-      jobIndex: s.missions.jobIndex, storyDone: s.missions.storyDone,
-      packagesFound: s.missions.packagesFound, packages: s.city.packages.map((p) => p.taken),
-    }));
-  } catch { /* private window: progress lasts the visit */ }
-}
+const params = new URLSearchParams(location.search);
+const seed = Number(params.get('seed') || 7);
+const shot = params.get('shot');
+
+const G = createGame(seed);
+bindInput(canvas);
 
 if (shot) {
-  const world = createWorld(createRandom(seed), null);
-  const renderer = createRenderer(canvas);
-  const scene = stageShot(shot, world);
-  let painted = 0;
-  const paint = () => {
-    renderer.draw(world.state, scene.screen, { hasSave: false });
-    painted += 1;
-    if (painted < 3) requestAnimationFrame(paint); else window.__shotReady = true;
+  stageShot(G, shot);
+  // Hold the staged frame; only the light's small animations move.
+  const hold = () => {
+    G.time += 1 / 30;
+    drawWorld(ctx, G);
+    if (G.mode === 'play') drawHUD(ctx, G);
+    drawMenus(ctx, G);
+    requestAnimationFrame(hold);
   };
-  requestAnimationFrame(paint);
+  hold();
 } else {
-  let saved = readSave();
-  let world = createWorld(createRandom(seed), saved);
-  const renderer = createRenderer(canvas);
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let card = null;
-  let accumulator = 0; let last = performance.now();
-  const announce = (m) => { status.textContent = m; };
+  let last = performance.now();
+  const frame = (now) => {
+    const dt = Math.min(0.033, (now - last) / 1000 || 0.016);
+    last = now;
 
-  function newGame() {
-    saved = null;
-    try { window.localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ }
-    world = createWorld(createRandom(seed), null);
-    screen = SCREEN_PLAY; announce('New game in Palm Cay.');
-  }
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, 0.25); last = now;
-    // world.step consumes the queued one-shot actions itself via input.
-    if (screen === SCREEN_TITLE) {
-      if (input.held.has('Enter')) { audio.unlock(); screen = SCREEN_PLAY; announce('Playing.'); }
-      else if (input.held.has('KeyN')) { audio.unlock(); newGame(); }
-      world.step(STEP, null, audio);
-    } else if (screen === SCREEN_PLAY) {
-      if (input.held.has('KeyM')) { input.held.delete('KeyM'); const m = audio.toggleMute(); announce(m ? 'Muted.' : 'Sound on.'); }
-      let steps = 0;
-      while (accumulator >= STEP && steps < 5) {
-        const ev = world.step(STEP, input, audio);
-        accumulator -= STEP; steps += 1;
-        if (ev & EV_CARD && world.state.pendingCard) { card = world.state.pendingCard; world.state.pendingCard = null; screen = SCREEN_CARD; break; }
-        if (ev & EV_BUSTED) { world.respawn('busted'); screen = SCREEN_BUSTED; writeSave(world); break; }
-        if (ev & EV_WASTED) { world.respawn('wasted'); screen = SCREEN_WASTED; writeSave(world); break; }
-      }
-      if (steps > 0 && Math.random() < 0.01) writeSave(world);
-    } else if (screen === SCREEN_PAUSED) {
-      if (input.held.has('KeyP') || input.held.has('Escape')) screen = SCREEN_PLAY;
-    } else if (screen === SCREEN_CARD || screen === SCREEN_BUSTED || screen === SCREEN_WASTED) {
-      if (input.held.has('Enter')) { screen = SCREEN_PLAY; card = null; writeSave(world); }
+    // Menu keys are handled before the step so a press is spent once.
+    if (G.mode === 'title') {
+      if (keyPressed('Enter')) startRun(G, false);
+      else if (keyPressed('KeyC') && G.hasSave) startRun(G, true);
+    } else if (G.mode === 'card' || G.mode === 'busted' || G.mode === 'wasted' || G.mode === 'ending') {
+      if (keyPressed('Enter')) dismissCard(G);
+    } else if (G.mode === 'play' && keyPressed('KeyP', 'Escape')) {
+      G.mode = 'pause';
+    } else if (G.mode === 'pause' && keyPressed('KeyP', 'Escape', 'Enter')) {
+      G.mode = 'play';
     }
-    // pause toggle from held keys (edge-ish: clear after use)
-    if (screen === SCREEN_PLAY && input.held.has('KeyP')) { input.held.delete('KeyP'); screen = SCREEN_PAUSED; }
-    renderer.draw(world.state, screen, { hasSave: !!saved, card });
-    if (screen !== SCREEN_PLAY) accumulator = 0;
-  }
-  announce('HEATLINE: Palm Cay. Press Enter to start.');
+    if (keyPressed('KeyM')) toggleMute();
+
+    stepGame(G, dt);
+    drawWorld(ctx, G);
+    if (G.mode !== 'title') drawHUD(ctx, G);
+    drawMenus(ctx, G);
+    endFrameInput();
+    requestAnimationFrame(frame);
+  };
   requestAnimationFrame(frame);
 }
