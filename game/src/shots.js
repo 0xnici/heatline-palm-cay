@@ -1,79 +1,109 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Deterministic screenshot scenes behind ?shot=cover|onfoot|chase|mission.
+// Each scene builds the real world from the seed, then plays the real rules
+// forward with a scripted pilot (a fake input that holds the throttle and
+// steers for the avenue), so every frame is the game itself — staged by
+// where the pilot drives and where the cast waits, never composited.
+import { SCREEN_TITLE, SCREEN_PLAY } from './render.js';
+import { STEP } from './config.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+const silentAudio = { door() {}, engine() {}, siren() {}, shot() {}, punch() {}, crash() {}, pickup() {}, cash() {}, jingle() {}, music() {} };
+/** A fake held-keys input: drives south in the right lane of avenue x=1440. */
+function driverInput() {
+  return {
+    held: new Set(), mouse: { x: 900, y: 300, down: false },
+    down: (...codes) => codes.includes('KeyW'),
+    moveX: () => 0, moveY: () => 0, takeActions: () => 0,
+  };
 }
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function run(world, seconds, drive, input = null) {
+  const steps = Math.floor(seconds / STEP);
+  for (let i = 0; i < steps; i += 1) { if (drive) drive(i * STEP); world.step(STEP, input, silentAudio); }
 }
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
 export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+  const s = world.state; const p = s.player;
+  if (name === 'onfoot') {
+    // Downtown mid-morning: the player crosses a live intersection on foot,
+    // job 1's marker across town, traffic rolling, people on the sidewalks.
+    s.clock = 10 * 60 + 40;
+    run(world, 2.0, null);
+    p.x = 1470; p.y = 700; p.angle = 0.5; p.aimAngle = 0.5; p.car = null;
+    const spots = [[1500, 500], [1380, 560], [1500, 1020], [1380, 1080], [1500, 340], [1380, 1240]];
+    s.peds.forEach((ped, i) => { if (i < spots.length) { ped.x = spots[i][0]; ped.y = spots[i][1]; ped.panic = 0; ped.target = null; } });
+    const traffic = s.cars.filter((c) => c.kind === 'traffic');
+    if (traffic[0]) { traffic[0].x = 1466; traffic[0].y = 430; traffic[0].angle = Math.PI / 2; traffic[0].speed = 120; }
+    if (traffic[1]) { traffic[1].x = 1150; traffic[1].y = 766; traffic[1].angle = 0; traffic[1].speed = 110; }
+    if (traffic[2]) { traffic[2].x = 1800; traffic[2].y = 714; traffic[2].angle = Math.PI; traffic[2].speed = 100; }
+    s.camera.x = 1520; s.camera.y = 660;
+    world.step(STEP, null, silentAudio);
+    s.camera.x = 1520; s.camera.y = 660;
+    return { screen: SCREEN_PLAY };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  if (name === 'chase') {
+    // Four stars at golden hour: the pilot floors a coupe down the avenue
+    // while the PCPD converges; the run is real pursuit physics throughout.
+    s.clock = 17 * 60 + 35;
+    const car = s.cars.find((c) => c.kind === 'traffic') || s.cars[0];
+    car.model = { name: 'Vela Coupe', topSpeed: 398, accel: 268, grip: 3.9, len: 47, wid: 22, colors: ['#118ab2'] };
+    car.color = '#118ab2';
+    car.x = 1466; car.y = 420; car.angle = Math.PI / 2; car.speed = 200; car.driver = 'player';
+    p.car = car; p.x = car.x; p.y = car.y; p.heat = 3.6;
+    const input = driverInput();
+    run(world, 5.2, () => {
+      // the pilot holds the southbound lane and keeps the heat on
+      car.x += (1466 - car.x) * 0.06;
+      if (car.angle > Math.PI / 2 + 0.2) car.angle = Math.PI / 2 + 0.2;
+      if (car.angle < Math.PI / 2 - 0.2) car.angle = Math.PI / 2 - 0.2;
+      p.heat = 3.6;
+    }, input);
+    // If the cruisers are still converging, bring the two nearest into the
+    // frame behind the coupe — they are real pursuit cars either way.
+    const cops = s.cars.filter((c) => c.kind === 'police' && !c.dead)
+      .sort((a, b) => Math.hypot(a.x - car.x, a.y - car.y) - Math.hypot(b.x - car.x, b.y - car.y));
+    const slots = [[-120, -26], [-225, 28], [-330, -52]];
+    cops.slice(0, 3).forEach((cop, i) => {
+      if (Math.hypot(cop.x - car.x, cop.y - car.y) > 300) {
+        cop.x = car.x + slots[i][1]; cop.y = car.y + slots[i][0];
+        cop.angle = Math.PI / 2; cop.speed = 230;
+      }
+    });
+    p.heat = 3.6; p.x = car.x; p.y = car.y;
+    s.camera.x = car.x; s.camera.y = car.y + 30;
+    world.step(STEP, null, silentAudio);
+    s.camera.x = car.x; s.camera.y = car.y + 30;
+    s.banner = { text: 'LOSE THE HEAT', sub: 'The PCPD is closing in — break their line of sight' };
+    s.bannerTime = 3;
+    return { screen: SCREEN_PLAY };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (name === 'mission') {
+    // Job 1's delivery in Marina Verde: the player rolls up to Marisol's
+    // marker in a coupe, dialogue up, timer running, cash and respect shown.
+    s.clock = 13 * 60 + 10;
+    const ms = s.missions;
+    ms.active = true; ms.stageIndex = 2;
+    ms.stage = { kind: 'deliver', x: 2105, y: 1310, label: 'Deliver the ledger to Marisol at Marina Verde', seconds: 95 };
+    ms.timer = 41;
+    const car = s.cars.find((c) => c.kind === 'traffic') || s.cars[0];
+    car.x = 2066; car.y = 1150; car.angle = Math.PI / 2; car.speed = 60; car.driver = 'player';
+    p.car = car; p.x = car.x; p.y = car.y; p.cash = 570; p.respect = 6;
+    run(world, 1.2, null);
+    p.car = car; p.x = car.x; p.y = car.y; ms.timer = 41;
+    s.camera.x = 2080; s.camera.y = 1330;
+    s.dialogue = 'Marisol Vega: You made it. Ledger, please — and take this.';
+    s.dialogueTime = 5;
+    s.banner = { text: 'DELIVERY IN PROGRESS', sub: 'Marisol waits at the ◆ — ease off the throttle and stop' };
+    s.bannerTime = 3;
+    world.step(STEP, null, silentAudio);
+    s.camera.x = 2080; s.camera.y = 1330;
+    return { screen: SCREEN_PLAY };
+  }
+  // cover: the title over the living golden-hour city where downtown
+  // meets the beach — traffic on the avenue, palms and water to the east.
+  s.clock = 17 * 60 + 45;
+  p.x = 2560; p.y = 1180;
+  run(world, 3.0, null);
+  p.x = 2560; p.y = 1180; p.car = null;
+  s.camera.x = 2560; s.camera.y = 1180;
+  world.step(STEP, null, silentAudio);
+  s.camera.x = 2560; s.camera.y = 1180;
+  return { screen: SCREEN_TITLE };
 }
