@@ -1,6 +1,22 @@
 [
-  { "name": "1-cover.jpg", "query": "?shot=cover&seed=7" },
-  { "name": "2-onfoot.jpg", "query": "?shot=onfoot&seed=7" },
-  { "name": "3-chase.jpg", "query": "?shot=chase&seed=7" },
-  { "name": "4-mission.jpg", "query": "?shot=mission&seed=7" }
+  {
+    "caption": "A fixer leans in with the job details while the delivery timer ticks down, the next objective already marked across town.",
+    "name": "4-mission.jpg",
+    "query": "?shot=mission&seed=11"
+  },
+  {
+    "caption": "The title screen hangs over the coastal avenue at golden hour, Palm Cay traffic rolling past below the HEATLINE wordmark.",
+    "name": "1-cover.jpg",
+    "query": "?shot=cover&seed=11"
+  },
+  {
+    "caption": "Four stars up, PCPD Interceptors swarm the player's coupe through a downtown junction, bumpers already trading paint.",
+    "name": "3-chase.jpg",
+    "query": "?shot=chase&seed=11"
+  },
+  {
+    "caption": "On foot in Downtown Cay, objective banner overhead and minimap in the corner, with a parked car waiting to be borrowed.",
+    "name": "2-onfoot.jpg",
+    "query": "?shot=onfoot&seed=11"
+  }
 ]
